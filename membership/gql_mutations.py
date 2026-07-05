@@ -9,6 +9,24 @@ from membership.utils.db_helper import SQLiteHelper
 from membership.utils.auth_helper import authenticate_and_get_token
 from membership.views import create_insuree_user
 
+import jwt
+import datetime
+from django.conf import settings
+
+def generate_insuree_token(insuree):
+    expiration = datetime.datetime.utcnow() + datetime.timedelta(days=7)
+    payload = {
+        "insuree_uuid": str(insuree.uuid),
+        "chfid": insuree.chf_id,
+        "role": "insuree",
+        "exp": expiration,
+        "iat": datetime.datetime.utcnow(),
+    }
+    token = jwt.encode(payload, settings.SECRET_KEY, algorithm="HS256")
+    if isinstance(token, bytes):
+        token = token.decode('utf-8')
+    return token
+
 class GeneratePdfSlip(graphene.Mutation):
     class Arguments:
         insuree_uuid = graphene.String(required=True)
@@ -41,30 +59,34 @@ class LoginInsuree(graphene.Mutation):
         request = info.context
         db_helper = SQLiteHelper()
         try:
-            # Check if user is standard or linked to an insuree
             user = User.objects.filter(username=username).first()
             if not user:
-                # Fallback: if username matches chf_id in tblInsuree
-                insuree = Insuree.objects.filter(chf_id=username).first()
-                if insuree:
-                    # Look up if this insuree has a registered user
-                    # In SQLite we link insuree_id to user_id
-                    pass
+                return LoginInsuree(success=False, message="User not found")
 
-            is_insuree = db_helper.is_insuree(user.i_user_id) if user else False
+            is_insuree = db_helper.is_insuree(user.i_user_id)
             insuree_id = db_helper.get_insuree_id_by_user_id(user.i_user_id)
             insuree = Insuree.objects.filter(id=insuree_id).first() if is_insuree else None
 
             token_data = authenticate_and_get_token(username, password, request)
             if token_data:
-                return LoginInsuree(
-                    success=True,
-                    token=token_data["token"],
-                    refresh_token=token_data["token"],
-                    is_insuree=is_insuree,
-                    insuree_uuid=insuree.uuid if insuree else None,
-                    message="Login successful"
-                )
+                if is_insuree and insuree:
+                    stateless_token = generate_insuree_token(insuree)
+                    return LoginInsuree(
+                        success=True,
+                        token=stateless_token,
+                        refresh_token=stateless_token,
+                        is_insuree=True,
+                        insuree_uuid=insuree.uuid,
+                        message="Login successful (stateless)"
+                    )
+                else:
+                    return LoginInsuree(
+                        success=True,
+                        token=token_data["token"],
+                        refresh_token=token_data["token"],
+                        is_insuree=False,
+                        message="Login successful (stateful)"
+                    )
             else:
                 return LoginInsuree(success=False, message="Invalid username or password")
         except Exception as e:
